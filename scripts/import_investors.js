@@ -4,9 +4,10 @@
 // Safe to re-run — uses ON CONFLICT so re-running won't create duplicates.
 
 require('dotenv').config();
+const path = require('path');
+const fs = require('fs');
 const XLSX = require('xlsx');
 const { Pool } = require('pg');
-const path = require('path');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -19,10 +20,10 @@ const FACILITY_CONFIGS = [
     facilityCode: 'KMC',
     sheetName: 'KMC',
     cols: { month: 0, year: 1, amount: 2 },
-    investmentRow: 3,
-    percentageRow: 4,
-    dataStartRow: 5,
-    dataEndRow: 33, // exclusive — row 33 is blank, before the Totals section
+    investmentRow: 1,
+    percentageRow: 2,
+    dataStartRow: 3,
+    dataEndRow: 31, // exclusive — row 31 is blank, before the Totals section
     investors: [
       { name: 'Iqbal', amountCol: 3, statusCol: 4 },
       { name: 'Haris Aslam', amountCol: 5, statusCol: 6 },
@@ -36,31 +37,31 @@ const FACILITY_CONFIGS = [
   {
     facilityCode: 'EMAAR',
     sheetName: 'Emaar',
-    cols: { month: 3, year: 4, amount: 5 },
-    investmentRow: 4,
-    percentageRow: 5,
-    dataStartRow: 6,
-    dataEndRow: 23,
+    cols: { month: 0, year: 1, amount: 2 },
+    investmentRow: 1,
+    percentageRow: 2,
+    dataStartRow: 3,
+    dataEndRow: 20,
     investors: [
-      { name: 'Ahsan', amountCol: 6, statusCol: 7 },
-      { name: 'Haris', amountCol: 8, statusCol: 9 },
-      { name: 'Abdullah', amountCol: 10, statusCol: 11 },
-      { name: 'Suleman', amountCol: 12, statusCol: 13 },
+      { name: 'Ahsan', amountCol: 3, statusCol: 4 },
+      { name: 'Haris', amountCol: 5, statusCol: 6 },
+      { name: 'Abdullah', amountCol: 7, statusCol: 8 },
+      { name: 'Suleman', amountCol: 9, statusCol: 10 },
     ],
   },
   {
     facilityCode: 'MALIR',
     sheetName: 'Malir',
-    cols: { month: 2, year: 3, amount: 4 },
-    investmentRow: 3,
-    percentageRow: 4,
-    dataStartRow: 5,
-    dataEndRow: 22,
+    cols: { month: 0, year: 1, amount: 2 },
+    investmentRow: 1,
+    percentageRow: 2,
+    dataStartRow: 3,
+    dataEndRow: 20,
     investors: [
-      { name: 'STA', amountCol: 5, statusCol: 6 },
-      { name: 'UC', amountCol: 7, statusCol: 8 },
-      { name: 'Entertainer Asia', amountCol: 9, statusCol: 10 },
-      { name: 'MC', amountCol: 11, statusCol: 12 },
+      { name: 'STA', amountCol: 3, statusCol: 4 },
+      { name: 'UC', amountCol: 5, statusCol: 6 },
+      { name: 'Entertainer Asia', amountCol: 7, statusCol: 8 },
+      { name: 'MC', amountCol: 9, statusCol: 10 },
     ],
   },
 ];
@@ -94,8 +95,19 @@ function toPeriodDate(monthName, year) {
   return `${year}-${String(monthNum).padStart(2, '0')}-01`;
 }
 
+// Resolve the workbook path. Override with XLSX_PATH=/some/path node import_investors.js
+// if your file isn't at the default location — the previous hardcoded path used spaces
+// and a '../data/' folder that didn't match the actual filename (underscores, no spaces).
+const XLSX_PATH = process.env.XLSX_PATH || path.join(__dirname, '..', 'data', 'Maidan Investor Disbursements.xlsx');
+
 async function run() {
-  const workbook = XLSX.readFile(path.join(__dirname, '..', 'data', 'Maidan Investor Disbursements.xlsx'));
+  if (!fs.existsSync(XLSX_PATH)) {
+    console.error(`❌ Workbook not found at: ${XLSX_PATH}`);
+    console.error(`   Set XLSX_PATH env var to the correct location, or place the file next to this script.`);
+    process.exit(1);
+  }
+  console.log(`Reading workbook: ${XLSX_PATH}`);
+  const workbook = XLSX.readFile(XLSX_PATH);
   const client = await pool.connect();
 
   try {
@@ -111,6 +123,9 @@ async function run() {
         'SELECT id FROM facilities WHERE code = $1',
         [config.facilityCode]
       );
+      if (facilityRes.rows.length === 0) {
+        throw new Error(`No row in "facilities" with code = '${config.facilityCode}'. Create it before running this import.`);
+      }
       const facilityId = facilityRes.rows[0].id;
 
       const investmentRowData = rows[config.investmentRow];
@@ -140,7 +155,7 @@ async function run() {
         const fiRes = await client.query(
           `INSERT INTO facility_investors (facility_id, investor_id, investment_amount, ownership_percentage, effective_from)
            VALUES ($1, $2, $3, $4, '2024-08-01')
-           ON CONFLICT DO NOTHING
+           ON CONFLICT (facility_id, investor_id) WHERE effective_to IS NULL DO NOTHING
            RETURNING id`,
           [facilityId, investorId, investmentAmount || null, ownershipPct]
         );
