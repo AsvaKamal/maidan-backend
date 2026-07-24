@@ -168,8 +168,32 @@ function cleanText(v) {
   return s.length ? s : null;
 }
 
+// Reverse of the xlsx library's serial -> Date conversion (1900 date system,
+// including Excel's fictitious 1900-02-29, hence the <= 60 correction).
+// 1900-01-01 -> 1, 1900-01-02 -> 2, 1900-01-01T12:00 -> 1.5
+function excelSerialFromDate(d) {
+  const epoch = Date.UTC(1899, 11, 30);
+  const ms = Date.UTC(
+    d.getFullYear(), d.getMonth(), d.getDate(),
+    d.getHours(), d.getMinutes(), d.getSeconds()
+  );
+  let serial = (ms - epoch) / 86400000;
+  if (serial <= 60) serial -= 1;
+  return serial;
+}
+
+// Numeric cells in these sheets are sometimes DATE-FORMATTED by accident: a
+// supervisor types "1" into a cell Excel has formatted as a date, so Excel
+// stores 1 but renders it "1-Jan" and the xlsx library hands us a Date object.
+// Number(Date) would yield epoch milliseconds (~-2.2e12), which overflows the
+// numeric column and rolls back the WHOLE file. Converting back to the Excel
+// serial recovers the number the person actually typed.
 function cleanNumber(v) {
   if (v === null || v === undefined || v === '') return null;
+  if (v instanceof Date) {
+    const serial = excelSerialFromDate(v);
+    return Number.isFinite(serial) ? serial : null;
+  }
   const n = Number(v);
   return Number.isNaN(n) ? null : n;
 }
@@ -357,12 +381,36 @@ async function processSales(client, workbook, importBatchId, fileName, warnings,
       warnings.push(`[${fileName}] Row ${i + 1}: UNRECOGNIZED income/sport label "${incomeRaw}" — imported as sport_types."${sportName}", please review.`);
     }
 
-    const hours = cleanNumber(colMap.hours !== undefined ? row[colMap.hours] : null);
-    const grossAmount = cleanNumber(colMap.amount !== undefined ? row[colMap.amount] : null);
-    const netAmount = cleanNumber(colMap.netAmount !== undefined ? row[colMap.netAmount] : null);
+    const hoursRaw = colMap.hours !== undefined ? row[colMap.hours] : null;
+    const grossRaw = colMap.amount !== undefined ? row[colMap.amount] : null;
+    const netRaw = colMap.netAmount !== undefined ? row[colMap.netAmount] : null;
+
+    const hours = cleanNumber(hoursRaw);
+    const grossAmount = cleanNumber(grossRaw);
+    const netAmount = cleanNumber(netRaw);
+
+    // Flag (but still import) any numeric cell that arrived date-formatted, so
+    // the recovered value can be eyeballed against the source sheet.
+    for (const [label, raw, val] of [
+      ['No of Hours', hoursRaw, hours],
+      ['Amount', grossRaw, grossAmount],
+      ['Net amount', netRaw, netAmount],
+    ]) {
+      if (raw instanceof Date) {
+        warnings.push(`[${fileName}] Row ${i + 1}: "${label}" was DATE-FORMATTED in Excel (shows as a date, not a number) — recovered underlying value ${val}. Please verify against the sheet.`);
+      }
+    }
 
     if (hours === null || grossAmount === null || netAmount === null) {
       warnings.push(`[${fileName}] Row ${i + 1}: missing hours/amount/net amount — row skipped (customer: ${cleanText(customerRaw) || 'n/a'}).`);
+      continue;
+    }
+
+    // Guard against absurd values reaching the DB and rolling back a whole file.
+    // A single booking can't plausibly run 24+ hours; anything past that is a
+    // data-entry artifact, so skip the row loudly rather than kill the file.
+    if (hours <= 0 || hours > 24) {
+      warnings.push(`[${fileName}] Row ${i + 1}: implausible duration_hours (${hours}) — row skipped (customer: ${cleanText(customerRaw) || 'n/a'}, status: ${cleanText(colMap.status !== undefined ? row[colMap.status] : null) || 'n/a'}).`);
       continue;
     }
 
